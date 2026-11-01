@@ -87,8 +87,13 @@ def generate_draft(request: DraftIn):
         project = conn.execute("SELECT * FROM projects WHERE id=?", (request.project_id,)).fetchone()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    if not check_ollama().get("model_available"):
-        raise HTTPException(status_code=503, detail="Ollama is unavailable or configured model is not installed.")
+
+    status = check_ollama()
+    if not status.get("connected"):
+        raise HTTPException(status_code=503, detail="Cannot connect to Ollama. Make sure Ollama is running.")
+    if not status.get("model_available"):
+        raise HTTPException(status_code=503, detail=f"Model {OLLAMA_MODEL} is not installed. Run: ollama pull {OLLAMA_MODEL}")
+
     prompt = f"""Draft a {request.post_type} for {request.platform}.
 Communication goal: {request.goal}
 Project name: {project['name']}
@@ -100,14 +105,14 @@ Write only the proposed post. Do not add claims unsupported by the context.
 """
     try:
         content = generate(prompt, FOUNDER_SYSTEM_PROMPT)
-    if not content:
-        raise HTTPException(status_code=502, detail="Model returned an empty draft")
-    with connect() as conn:
-        cursor = conn.execute(
-            "INSERT INTO drafts(project_id,platform,post_type,content,model,status) VALUES(?,?,?,?,?,?)",
-            (request.project_id, request.platform, request.post_type, content, OLLAMA_MODEL, "draft")
-        )
-        return {"id": cursor.lastrowid, "content": content, "status": "draft"}
+        if not content:
+            raise HTTPException(status_code=502, detail="Model returned an empty draft")
+        with connect() as conn:
+            cursor = conn.execute(
+                "INSERT INTO drafts(project_id,platform,post_type,content,model,status) VALUES(?,?,?,?,?,?)",
+                (request.project_id, request.platform, request.post_type, content, OLLAMA_MODEL, "draft")
+            )
+            return {"id": cursor.lastrowid, "content": content, "status": "draft"}
     except HTTPException:
         raise
     except Exception as exc:
