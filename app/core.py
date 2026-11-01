@@ -30,10 +30,25 @@ def git(path,*args,limit=200000):
  if x.returncode:raise RuntimeError((x.stderr or 'Git failed')[:300])
  return x.stdout[:limit].strip()
 def validate(path):
- p=Path(path).expanduser().resolve(strict=True)
- if not p.is_dir():raise ValueError('Select a directory')
- if git(p,'rev-parse','--show-toplevel')!=str(p):raise ValueError('Select the repository root directory')
- return p
+ """Accept any directory inside a working tree and return Git's canonical root."""
+ if not isinstance(path,str) or not path.strip():
+  raise ValueError('Enter a local repository directory path.')
+ raw=path.strip().strip('"').strip("'")
+ # Windows drive paths cannot be accessed by a Linux-hosted server; provide actionable error.
+ if os.name!='nt' and re.match(r'^[A-Za-z]:[\\/]',raw):
+  raise ValueError('Windows drive paths require running the dashboard on the same Windows computer as the repository.')
+ try:p=Path(raw).expanduser().resolve(strict=True)
+ except (OSError,ValueError) as e:raise ValueError('Repository path does not exist or cannot be accessed: '+raw) from e
+ if not p.is_dir():raise ValueError('Repository path must be a directory.')
+ try:
+  root=git(p,'rev-parse','--show-toplevel')
+  inside=git(p,'rev-parse','--is-inside-work-tree')
+ except (RuntimeError,OSError) as e:raise ValueError('Git cannot find a working-tree repository at this directory. Choose a cloned Git repository.') from e
+ if inside!='true':raise ValueError('Selected directory is not inside a Git working tree.')
+ resolved=Path(root).resolve(strict=True)
+ if not resolved.is_dir():raise ValueError('Git returned an inaccessible repository root.')
+ return resolved
+
 def index(path):
  count=0; sizes=0; languages=Counter();dirs=Counter();important=[];frameworks=set();structure=[]
  for base,sub,files in os.walk(path,followlinks=False):
@@ -57,8 +72,11 @@ def classify(subject,files):
 
 def scan():
  path=validate(get('repo'))
- overview=index(path);head=git(path,'rev-parse','HEAD');branch=git(path,'branch','--show-current');dirty=git(path,'status','--porcelain','--untracked-files=no',limit=15000)
- commits=git(path,'log','-60','--format=%H%x1f%s%x1f%an%x1f%aI','--all').splitlines()
+ overview=index(path)
+ try:head=git(path,'rev-parse','HEAD')
+ except RuntimeError:head=''  # Valid newly initialized repositories have no HEAD commit yet.
+ branch=git(path,'branch','--show-current');dirty=git(path,'status','--porcelain','--untracked-files=no',limit=15000)
+ commits=git(path,'log','-60','--format=%H%x1f%s%x1f%an%x1f%aI','--all').splitlines() if head else []
  new=0
  with conn() as c:
   for line in reversed(commits):

@@ -36,3 +36,17 @@ Copy `.env.example` to `.env` to configure `OLLAMA_URL`, `OLLAMA_MODEL`, and `SC
 ## Tests
 
 From the project root: `.venv\Scripts\python.exe -m pytest -q`. The tests use a temporary Git repository and do not require Ollama.
+
+## Repository-wide indexing and Markdown reports
+
+After selecting the Git repository root, choose **Start background index**. Indexing runs in a worker and updates persistent SQLite FTS5 tables. **Refresh index status** displays progress, exclusions, errors, counts, and detected additions/modifications/deletions. Search returns local text excerpts; previews are limited to 12,000 characters. Monitoring rescans periodically according to `SCAN_INTERVAL`; start or stop it on the dashboard. `INDEX_MAX_BYTES`, `INDEX_EXCLUDE` and `INDEX_INCLUDE` configure file filtering. Only UTF-8 text formats are indexed. Files with sensitive names or recognizable credential patterns are excluded; this is a best-effort safeguard, **not a guarantee that every secret is detected**. Review all generated public text.
+
+Use the **Developer Markdown report generator** to select a period or check specific commits, then generate with a locally running Ollama model. The generated report is editable, previewable, and downloadable; approval is a local state only and never publishes anything. Reports contain abbreviated Git references when Ollama follows the instructions. Inference requires the configured local model; no cloud fallback is provided. The dashboard is intended only for a trusted local machine, and is bound to loopback by the Windows startup scripts. File preview and report generation are intended for the local operator; no login system is included.
+
+**Limitations:** Repository indexing uses polling, not native filesystem events. Git history is limited by the existing scanner to its most recent 60 commits; newly indexed files are matched by path and SHA-256, while Git handles committed rename detection. The report preview supports headings, paragraphs and simple bullets rather than full CommonMark. Repository context is retrieved with local SQLite FTS5, not embeddings. Do not expose the service to untrusted users. The index is tied to one selected repository; switch repositories only after clearing the local index/database, or use a fresh installation.
+
+## Repository selection and API diagnostics
+
+Run the server on the **same computer** that contains the Git working tree. Paste the local absolute directory path into **Local Git repository root**, then click **Select repository**. Subdirectories inside a Git working tree are accepted; Git resolves them to the canonical root (`git rev-parse --show-toplevel`). The selected root persists in local SQLite and is restored on dashboard reload. On Windows, drive letters, spaces, and backslashes work when the server is running on Windows. A browser directory chooser cannot grant a server access to arbitrary folders: use the path input.
+
+After selection, choose **Scan now** to scan Git and index source files, or **Start background index** to index files alone. Index progress is shown in the dashboard. The additional dashboard JavaScript is served at `/extra.js`. Invalid requests return an actionable error with endpoint and status; server-side failures are logged locally without dumping request bodies or source code. To diagnose a 400/422, inspect the browser Network tab for the exact request URL, JSON payload and response details; 422 indicates schema mismatch, while 400 indicates a rejected repository path or operation.
