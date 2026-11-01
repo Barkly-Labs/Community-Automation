@@ -1,125 +1,107 @@
-from datetime import datetime, timezone
+import os, json, asyncio, threading
+from contextlib import asynccontextmanager
+from pathlib import Path
+import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
-from .database import init_db, connect
-from .ollama_client import check_ollama, generate
-from .personality import FOUNDER_SYSTEM_PROMPT
-from .config import OLLAMA_MODEL
-
-app = FastAPI(title="Barkly Labs Community Automation", version="0.1.0")
-
-@app.on_event("startup")
-def startup():
-    init_db()
-
-class ProjectIn(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
-    description: str = ""
-    public_context: str = ""
-
-class DraftIn(BaseModel):
-    project_id: int
-    platform: str = "Discord"
-    post_type: str = "development_update"
-    goal: str = "Share a clear, friendly development update"
-    extra_instructions: str = ""
-
-@app.get("/", response_class=HTMLResponse)
-def dashboard():
-    return HTMLResponse("""
-<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Barkly Labs Community Automation</title>
-<style>
-body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;background:#faf8fb;color:#28232b}
-.card{background:white;border:1px solid #e8dfe9;border-radius:14px;padding:1rem;margin:1rem 0}
-input,textarea,select,button{font:inherit;padding:.65rem;border:1px solid #cfc5d1;border-radius:8px;width:100%;box-sizing:border-box;margin:.3rem 0}
-button{background:#5b2b52;color:white;cursor:pointer}small{color:#645a66}.draft{white-space:pre-wrap;background:#f4eff5;padding:1rem;border-radius:8px}
-</style></head><body>
-<h1>🐾 Barkly Labs Community Automation</h1>
-<p>Local-first • Draft-only • Human approval</p>
-<div class="card"><h2>Ollama status</h2><button onclick="status()">Check connection</button><pre id="status"></pre></div>
-<div class="card"><h2>Add a project</h2>
-<input id="name" placeholder="Project name">
-<textarea id="description" placeholder="Short description"></textarea>
-<textarea id="context" placeholder="Public-safe context / current status"></textarea>
-<button onclick="addProject()">Save project</button><pre id="projectResult"></pre></div>
-<div class="card"><h2>Generate a draft</h2>
-<select id="project"></select>
-<select id="type"><option value="development_update">Development update</option><option value="announcement">Announcement</option><option value="community_question">Community question</option><option value="technical_explanation">Technical explanation</option><option value="call_for_contributors">Call for contributors</option><option value="milestone">Milestone celebration</option></select>
-<input id="goal" value="Share a clear, friendly development update" placeholder="Communication goal">
-<textarea id="extra" placeholder="Optional instructions"></textarea>
-<button onclick="makeDraft()">Generate and save draft</button><pre id="draftResult" class="draft"></pre></div>
-<div class="card"><h2>Saved drafts</h2><button onclick="loadDrafts()">Refresh drafts</button><div id="drafts"></div></div>
-<script>
-async function status(){let r=await fetch('/api/ollama/status');document.getElementById('status').textContent=JSON.stringify(await r.json(),null,2)}
-async function projects(){let r=await fetch('/api/projects');let data=await r.json();let s=document.getElementById('project');s.innerHTML='';data.forEach(p=>{let o=document.createElement('option');o.value=p.id;o.textContent=p.name;s.appendChild(o)})}
-async function addProject(){let body={name:document.getElementById('name').value,description:document.getElementById('description').value,public_context:document.getElementById('context').value};let r=await fetch('/api/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});document.getElementById('projectResult').textContent=JSON.stringify(await r.json(),null,2);await projects()}
-async function makeDraft(){let body={project_id:Number(document.getElementById('project').value),platform:'Discord',post_type:document.getElementById('type').value,goal:document.getElementById('goal').value,extra_instructions:document.getElementById('extra').value};let r=await fetch('/api/drafts/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});let data=await r.json();document.getElementById('draftResult').textContent=data.content||JSON.stringify(data,null,2);await loadDrafts()}
-async function loadDrafts(){let r=await fetch('/api/drafts');let data=await r.json();document.getElementById('drafts').innerHTML=data.map(d=>`<div class="card"><b>#${d.id} — ${d.post_type}</b><p class="draft"></p><small>${d.created_at} · ${d.status}</small></div>`).join('');let els=document.querySelectorAll('#drafts .draft');data.forEach((d,i)=>els[i].textContent=d.content)}
-projects();loadDrafts();
-</script></body></html>
-""")
-
-@app.get("/api/ollama/status")
-def ollama_status():
-    return check_ollama()
-
-@app.get("/api/projects")
-def list_projects():
-    with connect() as conn:
-        rows = conn.execute("SELECT * FROM projects ORDER BY id DESC").fetchall()
-        return [dict(row) for row in rows]
-
-@app.post("/api/projects")
-def create_project(project: ProjectIn):
-    with connect() as conn:
-        cursor = conn.execute(
-            "INSERT INTO projects(name,description,public_context) VALUES(?,?,?)",
-            (project.name.strip(), project.description, project.public_context)
-        )
-        return {"id": cursor.lastrowid, "name": project.name}
-
-@app.post("/api/drafts/generate")
-def generate_draft(request: DraftIn):
-    with connect() as conn:
-        project = conn.execute("SELECT * FROM projects WHERE id=?", (request.project_id,)).fetchone()
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    status = check_ollama()
-    if not status.get("connected"):
-        raise HTTPException(status_code=503, detail="Cannot connect to Ollama. Make sure Ollama is running.")
-    if not status.get("model_available"):
-        raise HTTPException(status_code=503, detail=f"Model {OLLAMA_MODEL} is not installed. Run: ollama pull {OLLAMA_MODEL}")
-
-    prompt = f"""Draft a {request.post_type} for {request.platform}.
-Communication goal: {request.goal}
-Project name: {project['name']}
-Description: {project['description']}
-Public-safe context: {project['public_context']}
-Additional instructions: {request.extra_instructions}
-
-Write only the proposed post. Do not add claims unsupported by the context.
-"""
-    try:
-        content = generate(prompt, FOUNDER_SYSTEM_PROMPT)
-        if not content:
-            raise HTTPException(status_code=502, detail="Model returned an empty draft")
-        with connect() as conn:
-            cursor = conn.execute(
-                "INSERT INTO drafts(project_id,platform,post_type,content,model,status) VALUES(?,?,?,?,?,?)",
-                (request.project_id, request.platform, request.post_type, content, OLLAMA_MODEL, "draft")
-            )
-            return {"id": cursor.lastrowid, "content": content, "status": "draft"}
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Generation failed: {exc}")
-
-@app.get("/api/drafts")
-def list_drafts():
-    with connect() as conn:
-        rows = conn.execute("SELECT * FROM drafts ORDER BY id DESC LIMIT 100").fetchall()
-        return [dict(row) for row in rows]
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+from . import core
+load_dotenv(core.ROOT/'.env')
+lock=threading.Lock()
+KINDS={'discord':'Discord announcement','developer':'Developer update','progress':'Progress report','feature':'Feature announcement','release':'Release notes','discussion':'Community discussion prompt'}
+class Repo(BaseModel):path:str
+class DraftRequest(BaseModel):change_id:int;kind:str='developer'
+class Edit(BaseModel):body:str;status:str='pending'
+class Config(BaseModel):endpoint:str='http://127.0.0.1:11434';model:str='llama3.1:8b'
+def config():return Config(endpoint=core.get('endpoint',os.getenv('OLLAMA_URL','http://127.0.0.1:11434')),model=core.get('model',os.getenv('OLLAMA_MODEL','llama3.1:8b')))
+def endpoint():
+ url=config().endpoint.rstrip('/')
+ if not (url.startswith('http://127.0.0.1:') or url.startswith('http://localhost:') or url=='http://127.0.0.1' or url=='http://localhost'):raise HTTPException(400,'Only local loopback Ollama endpoints are allowed')
+ return url
+async def ai(prompt):
+ async with httpx.AsyncClient(timeout=120,trust_env=False) as client:
+  r=await client.post(endpoint()+'/api/generate',json={'model':config().model,'prompt':prompt,'stream':False,'options':{'temperature':0.2,'num_predict':650}})
+  r.raise_for_status();return r.json().get('response','').strip()
+async def monitor():
+ while True:
+  await asyncio.sleep(max(10,int(os.getenv('SCAN_INTERVAL','60'))))
+  if core.get('monitoring')=='true' and core.get('repo'):
+   try:
+    if lock.acquire(False):
+     try:await asyncio.to_thread(core.scan)
+     finally:lock.release()
+   except Exception as e:core.setval('monitor_error',str(e)[:300])
+@asynccontextmanager
+async def lifespan(app):
+ core.init();task=asyncio.create_task(monitor())
+ try:yield
+ finally:task.cancel()
+app=FastAPI(title='Barkly Labs Community Automation',lifespan=lifespan,docs_url=None,redoc_url=None)
+@app.get('/')
+def home():return FileResponse(core.ROOT/'app/static/index.html')
+@app.get('/app.css')
+def css():return FileResponse(core.ROOT/'app/static/app.css')
+@app.get('/app.js')
+def js():return FileResponse(core.ROOT/'app/static/app.js')
+@app.get('/api/state')
+def state():return {**core.history(),'config':config().model_dump(),'monitor_error':core.get('monitor_error')}
+@app.post('/api/repo')
+def repo(data:Repo):
+ try:p=core.validate(data.path)
+ except Exception as e:raise HTTPException(400,str(e))
+ core.setval('repo',str(p));return {'repository':str(p)}
+@app.post('/api/scan')
+def scan():
+ if not lock.acquire(False):raise HTTPException(409,'Scan already running')
+ try:
+  try:return core.scan()
+  except Exception as e:raise HTTPException(400,str(e))
+ finally:lock.release()
+@app.post('/api/monitor/{action}')
+def monitoring(action:str):
+ if action not in ('start','stop'):raise HTTPException(400,'Invalid action')
+ core.setval('monitoring',str(action=='start').lower());return {'monitoring':action=='start'}
+@app.post('/api/config')
+def save_config(data:Config):
+ if not (data.endpoint.startswith('http://localhost:') or data.endpoint.startswith('http://127.0.0.1:')):raise HTTPException(400,'Ollama must be on loopback')
+ core.setval('endpoint',data.endpoint);core.setval('model',data.model);return {'ok':True}
+@app.get('/api/ollama')
+async def ollama():
+ try:
+  async with httpx.AsyncClient(timeout=4,trust_env=False) as c:
+   r=await c.get(endpoint()+'/api/tags');r.raise_for_status()
+   return {'connected':True,'models':[m.get('name') for m in r.json().get('models',[])],'configured':config().model}
+ except Exception as e:return {'connected':False,'error':str(e)[:200],'configured':config().model}
+@app.post('/api/analyze/{change_id}')
+async def analyze(change_id:int):
+ with core.conn() as c:row=c.execute('SELECT * FROM changes WHERE id=?',(change_id,)).fetchone()
+ if not row:raise HTTPException(404,'Commit not found')
+ path=core.validate(core.get('repo'));files=json.loads(row['files'])
+ # Commit metadata and filenames only: no raw source or secrets included in prompts.
+ prompt=f'''Analyze only the documented Git evidence below. Do not invent functionality, dates, results, or claims. If evidence is insufficient, explicitly say so. Return concise factual summary and a line 'Significance: minor|normal|major' and 'Announcement: yes|no'.\nCommit subject: {row['subject'][:300]}\nChanged non-sensitive filenames: {json.dumps(files)[:4500]}\nRepository context: {json.dumps(core.index(path))[:3000]}'''
+ try:result=await ai(prompt)
+ except Exception as e:raise HTTPException(503,'Local Ollama failed: '+str(e)[:200])
+ import re
+ m=re.search(r'Significance:\s*(minor|normal|major)',result,re.I);a=re.search(r'Announcement:\s*(yes|no)',result,re.I)
+ sig=m.group(1).lower() if m else row['significance'];announce=int(a.group(1).lower()=='yes') if a else row['announce']
+ with core.conn() as c:c.execute('UPDATE changes SET summary=?,significance=?,announce=? WHERE id=?',(result,sig,announce,change_id))
+ return {'summary':result,'significance':sig,'announce':bool(announce)}
+@app.post('/api/drafts')
+async def draft(data:DraftRequest):
+ if data.kind not in KINDS:raise HTTPException(400,'Invalid draft type')
+ with core.conn() as c:row=c.execute('SELECT * FROM changes WHERE id=?',(data.change_id,)).fetchone()
+ if not row:raise HTTPException(404,'Commit not found')
+ prompt=f'''Write an editable {KINDS[data.kind]} for Barkly Labs, a Detroit-rooted accessibility-minded nonprofit technology lab. Warm, direct, curious, honest, technically grounded, community-centered; no corporate hype. Values: technology adapts to people; people are not numbers; accessibility, privacy, local-first tools and community agency matter. Use ONLY evidence below. Do not invent features, statistics, release dates, promises or achievements. No private personal details. If evidence is insufficient, say what is known without speculation. Never imply the draft has been published.\nCommit: {row['subject'][:300]}\nFiles: {row['files'][:4000]}\nVerified summary: {row['summary'][:5000]}'''
+ try:body=await ai(prompt)
+ except Exception as e:raise HTTPException(503,'Local Ollama failed: '+str(e)[:200])
+ with core.conn() as c:
+  cur=c.execute('INSERT INTO drafts(change_id,kind,body,status,created_at,updated_at) VALUES(?,?,?,?,?,?)',(data.change_id,data.kind,body,'pending',core.now(),core.now()));return {'id':cur.lastrowid,'body':body}
+@app.put('/api/drafts/{draft_id}')
+def edit(draft_id:int,data:Edit):
+ if data.status not in ('pending','approved','rejected'):raise HTTPException(400,'Invalid status')
+ if len(data.body)>30000:raise HTTPException(400,'Draft too long')
+ with core.conn() as c:
+  cur=c.execute('UPDATE drafts SET body=?,status=?,updated_at=? WHERE id=?',(data.body,data.status,core.now(),draft_id))
+  if not cur.rowcount:raise HTTPException(404,'Draft not found')
+ return {'ok':True}
