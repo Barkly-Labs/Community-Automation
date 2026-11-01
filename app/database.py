@@ -2,20 +2,24 @@ import sqlite3
 from pathlib import Path
 from .config import DATABASE_URL
 
+
 def _db_path() -> str:
     prefix = "sqlite:///./"
     if DATABASE_URL.startswith(prefix):
-        return DATABASE_URL[len(prefix):]
+        return DATABASE_URL[len(prefix) :]
     if DATABASE_URL.startswith("sqlite:///"):
-        return DATABASE_URL[len("sqlite:///"):]
+        return DATABASE_URL[len("sqlite:///") :]
     return "barkly.db"
 
+
 DB_PATH = _db_path()
+
 
 def connect():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 def init_db():
     with connect() as conn:
